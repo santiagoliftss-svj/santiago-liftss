@@ -1,5 +1,5 @@
 /* SANTIAGO LIFTSS — offline cache (works at the gym with no signal) */
-const V = 'liftss-v4';
+const V = 'liftss-v5';
 const CORE = [
   './', './index.html', './manifest.json',
   './img/logo.webp', './img/logo-sm.webp', './img/sant7.webp',
