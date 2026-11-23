@@ -588,6 +588,11 @@ textarea.field{height:120px;padding:12px 14px;resize:none;font:400 16px/1.35 var
   *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
 }
 
+/* iOS home-screen: force full screen height (no black strip at the bottom) */
+html.sa{height:var(--fullh)!important;min-height:var(--fullh)}
+html.sa body{height:100%}
+html.sa .bg,html.sa .wk,html.sa .layer,html.sa .flash,html.sa .intro{bottom:auto;height:var(--fullh)}
+
 </style>
 </head>
 <body data-view="inicio">
@@ -771,7 +776,7 @@ function mergeState(d, p) {
   o.profile = Object.assign({}, d.profile, p.profile || {});
   o.settings = Object.assign({}, d.settings, p.settings || {});
   o.timer = Object.assign({}, d.timer, p.timer || {});
-  o.seed = p.seed | 0; o.split = typeof p.split === 'string' ? p.split : '';
+  o.seed = p.seed | 0; o.savedAt = +p.savedAt || 0; o.split = typeof p.split === 'string' ? p.split : '';
   ['custom', 'routines', 'workouts', 'bw'].forEach(k => { if (Array.isArray(p[k])) o[k] = p[k]; });
   o.active = p.active && typeof p.active === 'object' && Array.isArray(p.active.ex) ? p.active : null;
   if (!Array.isArray(o.settings.presets) || !o.settings.presets.length) o.settings.presets = d.settings.presets.slice();
@@ -787,10 +792,63 @@ function load() {
   if (migrate(S)) writeNow();
 }
 let saveTO = 0;
-function save(immediate) { clearTimeout(saveTO); if (immediate) writeNow(); else saveTO = setTimeout(writeNow, 300); }
-function writeNow() { try { localStorage.setItem(KEY, JSON.stringify(S)); STORE_OK = true; } catch (e) { STORE_OK = false; } }
+/* Saving: every change goes to localStorage AND IndexedDB (double copy), right away. */
+const IDB = {
+  db: null, p: null,
+  open() {
+    if (this.p) return this.p;
+    this.p = new Promise(res => {
+      try {
+        const r = indexedDB.open('santiago-liftss', 1);
+        r.onupgradeneeded = () => { try { r.result.createObjectStore('kv'); } catch (e) { /* */ } };
+        r.onsuccess = () => { this.db = r.result; res(this.db); };
+        r.onerror = () => res(null); r.onblocked = () => res(null);
+      } catch (e) { res(null); }
+    });
+    return this.p;
+  },
+  async get(k) { const db = await this.open(); if (!db) return null; return new Promise(res => { try { const q = db.transaction('kv', 'readonly').objectStore('kv').get(k); q.onsuccess = () => res(q.result == null ? null : q.result); q.onerror = () => res(null); } catch (e) { res(null); } }); },
+  async set(k, v) { const db = await this.open(); if (!db) return false; return new Promise(res => { try { const tx = db.transaction('kv', 'readwrite'); tx.objectStore('kv').put(v, k); tx.oncomplete = () => res(true); tx.onerror = () => res(false); tx.onabort = () => res(false); } catch (e) { res(false); } }); },
+};
+let lastSaved = 0, IDB_OK = false;
+function save(immediate) { clearTimeout(saveTO); if (immediate) writeNow(); else saveTO = setTimeout(writeNow, 120); }
+function writeNow() {
+  clearTimeout(saveTO);
+  S.savedAt = now();
+  const json = JSON.stringify(S);
+  try { localStorage.setItem(KEY, json); STORE_OK = true; } catch (e) { STORE_OK = false; }
+  IDB.set(KEY, json).then(ok => { IDB_OK = ok; });
+  lastSaved = S.savedAt;
+}
 function loadBgs() { try { const r = localStorage.getItem(BGKEY); BGC = r ? JSON.parse(r) : []; if (!Array.isArray(BGC)) BGC = []; } catch (e) { BGC = []; } }
-function saveBgs() { try { localStorage.setItem(BGKEY, JSON.stringify(BGC)); return true; } catch (e) { return false; } }
+function saveBgs() { let ok = false; const json = JSON.stringify(BGC); try { localStorage.setItem(BGKEY, json); ok = true; } catch (e) { ok = false; } IDB.set(BGKEY, json).then(r => { if (r && !ok) ok = true; }); return ok || BGC.length === 0 || ('indexedDB' in window); }
+/* On launch: if the IndexedDB copy is newer (or localStorage got wiped), restore from it. */
+async function recover() {
+  try {
+    const raw = await IDB.get(KEY);
+    if (raw) {
+      const p = JSON.parse(raw);
+      const lsEmpty = !(() => { try { return localStorage.getItem(KEY); } catch (e) { return null; } })();
+      if (p && (lsEmpty || (p.savedAt || 0) > (S.savedAt || 0) + 1000)) {
+        S = mergeState(defaults(), p); migrate(S); writeNow(); applyBg(); closeWorkoutSilent(); refreshAll();
+        if (S.active) setTimeout(openWorkout, 300);
+        toast('Tus datos se recuperaron', I.check);
+      }
+    } else writeNow();
+    const rb = await IDB.get(BGKEY);
+    if (rb && !BGC.length) { const arr = JSON.parse(rb); if (Array.isArray(arr) && arr.length) { BGC = arr; try { localStorage.setItem(BGKEY, rb); } catch (e) { /* */ } applyBg(); refresh(); } }
+    else if (BGC.length && !rb) saveBgs();
+  } catch (e) { /* */ }
+  try { if (navigator.storage && navigator.storage.persist) { const already = navigator.storage.persisted ? await navigator.storage.persisted() : false; if (!already) await navigator.storage.persist(); } } catch (e) { /* */ }
+}
+/* iOS home-screen apps sometimes report a viewport shorter than the screen (black strip at the bottom). */
+function fixHeight() {
+  if (!isStandalone()) return;
+  const r = document.documentElement, portrait = innerHeight >= innerWidth;
+  const sh = portrait ? Math.max(screen.height, screen.width) : Math.min(screen.height, screen.width);
+  const h = Math.max(innerHeight, sh || 0);
+  r.style.setProperty('--fullh', h + 'px'); r.classList.add('sa');
+}
 
 /* ---------- helpers ---------- */
 const exInfo = id => LIB.get(id) || (S && S.custom.find(e => e.id === id)) || { id, n: 'Ejercicio', m: 'OTRO', k: 'wr' };
@@ -1967,7 +2025,8 @@ function renderAjustes() {
       <div class="set-r"><div class="tx"><b>Intro con el logo</b></div>${tg('intro', s.intro, 'Intro')}</div>
     </div></section>
     <section class="sec st" style="--i:${i++}"><div class="sec-h"><h2>TUS DATOS</h2><span class="mono">RESPALDO</span></div><div class="set-g card edge">
-      <div class="set-r"><div class="tx"><b>Respaldo</b><small>Todo se guarda en este cel. Saca copia de vez en cuando.</small></div></div>
+      <div class="set-r"><div class="tx"><b>Guardado automático</b><small>${STORE_OK ? `Todo se guarda solo en este cel, al instante (doble copia). ${S.workouts.length} entreno${S.workouts.length === 1 ? '' : 's'} guardado${S.workouts.length === 1 ? '' : 's'}${lastSaved ? ' · último guardado ' + fmtHour(lastSaved) : ''}.` : 'Aquí no se puede guardar. Usa COPIAR para no perder nada.'}</small></div><span class="badge" style="${STORE_OK ? '' : 'background:#7a2030'}">${STORE_OK ? I.check + 'ON' : 'OFF'}</span></div>
+      <div class="set-r"><div class="tx"><b>Respaldo</b><small>Saca copia de vez en cuando por si cambias de cel.</small></div></div>
       <div class="set-r" style="gap:8px"><button class="gn sm" style="flex:1" data-act="exp-copy">${I.copy} COPIAR</button><button class="gn sm" style="flex:1" data-act="exp-dl">${I.download} DESCARGAR</button></div>
       <div class="set-r" style="gap:8px"><button class="gn sm" style="flex:1" data-act="imp-open">${I.upload} IMPORTAR</button><button class="gn sm danger" style="flex:1" data-act="wipe">${I.trash} BORRAR TODO</button></div>
     </div></section>
@@ -2233,6 +2292,7 @@ function intro() {
   el.addEventListener('click', gone); setTimeout(gone, 1450);
 }
 function init() {
+  fixHeight();
   load(); loadBgs();
   buildDock(); applyBg();
   Sparks.init(); if (S.settings.sparks) Sparks.start();
@@ -2246,6 +2306,10 @@ function init() {
   document.addEventListener('click', onGesture, true);
   document.addEventListener('visibilitychange', onVisible);
   addEventListener('pagehide', () => save(true));
+  addEventListener('freeze', () => save(true));
+  addEventListener('blur', () => save(true));
+  addEventListener('beforeunload', () => save(true));
+  addEventListener('resize', fixHeight); addEventListener('orientationchange', () => setTimeout(fixHeight, 300));
   addEventListener('hashchange', () => { const h = location.hash.slice(1); if (VIEWS.includes(h) && h !== cur) go(h); });
   document.addEventListener('keydown', e => { if (e.key === 'Escape') { if (!topLayerClose()) { if ($('#flash').classList.contains('on')) hideFlash(true); else if (wkOpen) closeWorkout(); } } });
   $('#flash').addEventListener('click', e => { if (!e.target.closest('button')) hideFlash(true); });
@@ -2255,6 +2319,8 @@ function init() {
   const h = (location.hash || '').slice(1);
   go(VIEWS.includes(h) ? h : 'inicio');
   intro(); kick(); Wake.sync();
+  recover();
+  if (S.active) setTimeout(() => { if (S.active && !wkOpen) openWorkout(); }, S.settings.intro ? 1600 : 200);
   if (!STORE_OK) setTimeout(() => toast('Aquí no se puede guardar. Saca respaldo en Ajustes', I.info, 5000), 1900);
   registerSW();
   window.__liftss = { S: () => S, T, Sound, go };
