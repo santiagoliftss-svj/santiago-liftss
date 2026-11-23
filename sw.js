@@ -1,5 +1,5 @@
 /* SANTIAGO LIFTSS — offline cache (works at the gym with no signal) */
-const V = 'liftss-v3';
+const V = 'liftss-v4';
 const CORE = [
   './', './index.html', './manifest.json',
   './img/logo.webp', './img/logo-sm.webp', './img/sant7.webp',
@@ -7,7 +7,7 @@ const CORE = [
   './img/icon-180.png', './img/icon-192.png', './img/icon-512.png', './img/favicon-64.png',
 ];
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(V).then(c => c.addAll(CORE)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(V).then(c => c.addAll(CORE.map(u => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== V && k !== V + '-fonts').map(k => caches.delete(k)))).then(() => self.clients.claim()));
